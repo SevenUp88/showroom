@@ -4,133 +4,156 @@ import pandas as pd
 from fpdf import FPDF
 from duckduckgo_search import DDGS
 import re
+import requests
+from io import BytesIO
+from PIL import Image
 
-st.set_page_config(page_title="Consorzio - Showroom", layout="wide")
+st.set_page_config(page_title="Consorzio Showroom Pro", layout="wide")
 
-# --- FUNZIONE PER PULIRE IL TESTO "SDOPPIATO" (GHOSTING) ---
+# --- FUNZIONI DI SERVIZIO ---
 def clean_stutter(text):
-    if not text:
-        return ""
-    # Se il testo ha caratteri doppi strani (es. "33..44") 
-    # prendiamo un carattere ogni due per pulire il ghosting
-    if ".." in text or ",," in text:
-        return "".join(text[::2])
-    return text
+    if not text: return ""
+    return "".join(text[::2]) if ".." in text or ",," in text else text
 
-# --- FUNZIONE RICERCA IMMAGINI ---
 def get_image_url(query):
     try:
         with DDGS() as ddgs:
             results = list(ddgs.images(query, max_results=1))
-            if results:
-                return results[0]['image']
-    except:
-        return None
-    return None
+            return results[0]['image'] if results else None
+    except: return None
 
-# --- FUNZIONE PARSING PDF S400 AGGIORNATA ---
+# --- PARSER PDF ---
 def parse_s400_pdf(file):
     items = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             text = page.extract_text()
-            if not text:
-                continue
-            lines = text.split('\n')
-            for line in lines:
-                # Regex migliorata per intercettare i tuoi prezzi sdoppiati
-                # Cerchiamo: Codice, Fornitore, Descrizione, UM (NR/MT), Qta, Prezzo (anche sporco)
+            if not text: continue
+            for line in text.split('\n'):
                 match = re.search(r'^(\d{5,})\s+(\S+)\s+(.+?)\s+([A-Z]{2})\s+(\d+)\s+([\d.,]+)', line)
                 if match:
-                    raw_price = match.group(6)
-                    clean_price = clean_stutter(raw_price)
-                    
                     items.append({
                         "Codice": match.group(1),
-                        "Fornitore": match.group(2),
+                        "Cod_Fornitore": match.group(2),
                         "Descrizione": match.group(3).strip(),
                         "Quantità": match.group(5),
-                        "Prezzo": clean_price,
+                        "Prezzo": clean_stutter(match.group(6)),
                         "Immagine": ""
                     })
     return items
 
-# --- GENERAZIONE PDF ---
-class PDF(FPDF):
-    def header(self):
-        self.set_font('Arial', 'B', 12)
-        self.cell(0, 10, 'PROPOSTA COMMERCIALE SHOWROOM', 0, 1, 'C')
-        self.ln(5)
+# --- LOGICA DELL'APP ---
+st.title("💎 Showroom Pro: Preventivi Emozionali")
+st.sidebar.header("Impostazioni")
+logo_file = st.sidebar.file_uploader("Carica Logo Consorzio (PNG/JPG)", type=["png", "jpg"])
 
-st.title("🚀 Showroom Designer - Consorzio")
-st.write("Trasforma il preventivo tecnico in una proposta emozionale.")
-
-uploaded_file = st.file_uploader("Trascina qui il PDF dell'S400", type="pdf")
+uploaded_file = st.file_uploader("Carica il PDF dell'S400", type="pdf")
 
 if uploaded_file:
-    data = parse_s400_pdf(uploaded_file)
-    if data:
-        df = pd.DataFrame(data)
+    if 'df' not in st.session_state:
+        st.session_state.df = pd.DataFrame(parse_s400_pdf(uploaded_file))
+
+    df = st.session_state.df
+
+    st.subheader("1. Verifica i dati")
+    st.session_state.df = st.data_editor(df, use_container_width=True)
+
+    if st.button("🔍 Cerca Immagini (Codice + Descrizione)"):
+        bar = st.progress(0)
+        for i, row in st.session_state.df.iterrows():
+            # TENTATIVO 1: Codice Fornitore (Più preciso)
+            query = f"{row['Descrizione'].split()[0]} {row['Cod_Fornitore']} prodotto"
+            url = get_image_url(query)
+            # TENTATIVO 2: Se fallisce, usa la Descrizione
+            if not url:
+                query = f"{row['Descrizione']} prodotto"
+                url = get_image_url(query)
+            
+            st.session_state.df.at[i, 'Immagine'] = url if url else ""
+            bar.progress((i + 1) / len(st.session_state.df))
+        st.rerun()
+
+    st.divider()
+
+    st.subheader("2. Revisione Immagini")
+    st.write("Se l'immagine non è corretta, incolla un nuovo link nel campo sotto la foto.")
+    
+    cols = st.columns(3)
+    for i, row in st.session_state.df.iterrows():
+        with cols[i % 3]:
+            st.write(f"**{row['Descrizione'][:30]}...**")
+            if row['Immagine']:
+                st.image(row['Immagine'], use_container_width=True)
+            else:
+                st.warning("Nessuna immagine trovata")
+            
+            # Campo per cambiare il link manualmente
+            new_url = st.text_input(f"Link per art. {row['Codice']}", value=row['Immagine'], key=f"img_{i}")
+            if new_url != row['Immagine']:
+                st.session_state.df.at[i, 'Immagine'] = new_url
+
+    st.divider()
+
+    if st.button("📝 Genera Proposta Finale"):
+        pdf = FPDF()
         
-        st.subheader("📋 Verifica i dati estratti")
-        st.info("Abbiamo pulito gli importi che sembravano duplicati. Controlla se sono corretti.")
+        # --- PAGINA 1: ECONOMICA ---
+        pdf.add_page()
+        if logo_file:
+            pdf.image(logo_file, 10, 8, 33)
         
-        # Editor per correggere descrizioni o prezzi
-        edited_df = st.data_editor(df, num_rows="dynamic", use_container_width=True)
+        pdf.set_font("Arial", 'B', 16)
+        pdf.ln(20)
+        pdf.cell(0, 10, "PROPOSTA ECONOMICA", 0, 1, 'C')
+        pdf.ln(10)
+        
+        pdf.set_font("Arial", 'B', 10)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(30, 10, "Codice", 1, 0, 'C', 1)
+        pdf.cell(90, 10, "Descrizione", 1, 0, 'C', 1)
+        pdf.cell(20, 10, "Qtà", 1, 0, 'C', 1)
+        pdf.cell(50, 10, "Totale", 1, 1, 'C', 1)
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔍 Trova Foto Prodotti"):
-                with st.spinner("Cercando le immagini migliori..."):
-                    for i, row in edited_df.iterrows():
-                        query = f"{row['Fornitore']} {row['Descrizione']}"
-                        img_url = get_image_url(query)
-                        if img_url:
-                            edited_df.at[i, 'Immagine'] = img_url
-                    st.rerun()
+        pdf.set_font("Arial", '', 9)
+        for _, row in st.session_state.df.iterrows():
+            pdf.cell(30, 10, str(row['Codice']), 1)
+            pdf.cell(90, 10, str(row['Descrizione'][:45]), 1)
+            pdf.cell(20, 10, str(row['Quantità']), 1, 0, 'C')
+            pdf.cell(50, 10, f"Euro {row['Prezzo']}", 1, 1, 'R')
 
-        with col2:
-            if st.button("🎨 Crea Proposta per Cliente"):
-                pdf = PDF()
-                
-                # SEZIONE ECONOMICA
-                pdf.add_page()
-                pdf.set_font("Arial", 'B', 16)
-                pdf.cell(0, 10, "PROPOSTA ECONOMICA", 0, 1, 'L')
-                pdf.ln(5)
-                
-                # Header Tabella
-                pdf.set_font("Arial", 'B', 10)
-                pdf.set_fill_color(240, 240, 240)
-                pdf.cell(25, 10, "Codice", 1, 0, 'C', 1)
-                pdf.cell(95, 10, "Descrizione Prodotto", 1, 0, 'C', 1)
-                pdf.cell(15, 10, "Qtà", 1, 0, 'C', 1)
-                pdf.cell(50, 10, "Prezzo Totale", 1, 1, 'C', 1)
+        # --- SEZIONE TECNICA ---
+        pdf.add_page()
+        pdf.set_font("Arial", 'B', 16)
+        pdf.cell(0, 10, "SCHEDE TECNICHE PRODOTTI", 0, 1, 'L')
+        pdf.set_font("Arial", 'I', 8)
+        pdf.cell(0, 5, "*Immagini esemplificative", 0, 1)
 
-                pdf.set_font("Arial", '', 9)
-                for _, row in edited_df.iterrows():
-                    pdf.cell(25, 10, str(row['Codice']), 1)
-                    pdf.cell(95, 10, str(row['Descrizione'][:50]), 1)
-                    pdf.cell(15, 10, str(row['Quantità']), 1, 0, 'C')
-                    pdf.cell(50, 10, f"Euro {row['Prezzo']}", 1, 1, 'R')
+        for _, row in st.session_state.df.iterrows():
+            pdf.ln(10)
+            y_start = pdf.get_y()
+            
+            # Testo a sinistra
+            pdf.set_font("Arial", 'B', 11)
+            pdf.cell(100, 7, row['Descrizione'], 0, 1)
+            pdf.set_font("Arial", '', 9)
+            pdf.cell(100, 5, f"Cod. Fornitore: {row['Cod_Fornitore']}", 0, 1)
+            pdf.cell(100, 5, f"Cod. Interno: {row['Codice']}", 0, 1)
+            
+            # Immagine a destra
+            if row['Immagine']:
+                try:
+                    res = requests.get(row['Immagine'], timeout=5)
+                    img = Image.open(BytesIO(res.content))
+                    img_path = f"temp_{row['Codice']}.jpg"
+                    img.convert("RGB").save(img_path)
+                    pdf.image(img_path, x=130, y=y_start, h=30)
+                except:
+                    pdf.set_xy(130, y_start)
+                    pdf.set_font("Arial", 'I', 7)
+                    pdf.cell(50, 10, "[Immagine non disponibile]", 0)
 
-                # SEZIONE TECNICA
-                pdf.add_page()
-                pdf.set_font("Arial", 'B', 16)
-                pdf.cell(0, 10, "PROPOSTA TECNICA (DETTAGLI)", 0, 1, 'L')
-                pdf.set_font("Arial", 'I', 8)
-                pdf.cell(0, 10, "*Immagini a scopo puramente illustrativo", 0, 1)
+            pdf.set_y(y_start + 35)
+            pdf.line(10, pdf.get_y(), 200, pdf.get_y())
 
-                for _, row in edited_df.iterrows():
-                    pdf.ln(10)
-                    pdf.set_font("Arial", 'B', 12)
-                    pdf.cell(0, 10, f"{row['Descrizione']}", 0, 1)
-                    if row['Immagine']:
-                        pdf.set_font("Arial", '', 9)
-                        pdf.cell(0, 5, f"Link Immagine: {row['Immagine'][:80]}...", 0, 1)
-                    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-
-                pdf_out = pdf.output(dest='S').encode('latin-1', errors='ignore')
-                st.download_button("📥 Scarica Proposta Showroom", pdf_out, "proposta_showroom.pdf", "application/pdf")
-    else:
-        st.warning("Nessun articolo trovato. Il PDF potrebbe avere un formato diverso dal solito.")
+        pdf_bytes = pdf.output(dest='S').encode('latin-1', errors='ignore')
+        st.download_button("📥 Scarica Book Showroom PDF", pdf_bytes, "Proposta_Showroom.pdf")
