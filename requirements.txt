@@ -1,0 +1,5 @@
+streamlit
+pdfplumber
+fpdf2
+duckduckgo_search
+pandas
